@@ -1,0 +1,1 @@
+wget https://rules.emergingthreats.net/open/suricata-$version/emerging.rules.tar.gz && gzip -d emerging.rules.tar.gz && tar x -f emerging.rules.tar -C /etc/suricata/
