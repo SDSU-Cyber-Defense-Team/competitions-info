@@ -1,0 +1,69 @@
+---
+- name: Gather and save installed software on Linux
+  hosts: linux
+  gather_facts: no
+  tasks:
+    - name: Gather package facts on Linux
+      package_facts:
+
+    - name: Save installed packages to a file on Linux
+      copy:
+        content: "{{ ansible_facts.packages | to_nice_json }}"
+        dest: "/tmp/installed_software_{{ inventory_hostname }}.json"
+
+    - name: Fetch installed software information from Linux to control node
+      fetch:
+        src: "/tmp/installed_software_{{ inventory_hostname }}.json"
+        dest: "./installed_software_reports/"
+        flat: yes
+
+- name: Gather and save installed software on Windows using PowerShell command
+  hosts: windows
+  collections:
+    - ansible.windows
+  gather_facts: no
+  tasks:
+    - name: Run PowerShell command to gather installed software
+      ansible.windows.win_powershell:
+        script: |
+           $softwareList = @()
+           foreach ($UKey in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+             'HKLM:\SOFTWARE\Wow6432node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+             'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+             'HKCU:\SOFTWARE\Wow6432node\Microsoft\Windows\CurrentVersion\Uninstall\*') {
+
+              foreach ($Product in (Get-ItemProperty $UKey -ErrorAction SilentlyContinue)) {
+                if ($Product.DisplayName -and $Product.SystemComponent -ne 1) {
+                $softwareList += $Product.DisplayName
+                }
+              }
+           }
+           $softwareList | Out-File -FilePath "C:\Temp\installed_software_{{ inventory_hostname }}.txt"
+      register: installed_software_output
+
+
+    - name: Fetch installed software information from Windows to control node
+      fetch:
+        src: "C:\\Temp\\installed_software_{{ inventory_hostname }}.txt"
+        dest: "./installed_software_reports/"
+        flat: yes
+#--- BELOW TASKS NOT TESTED, ONLY INCLUDE IF BSD SYSTEMS ARE PRESENT —# 
+   - name: Gather and save installed software on OpenBSD
+  hosts: OpenBSD
+  gather_facts: no
+  tasks:
+    - name: Get installed packages on OpenBSD
+      command: pkg_info
+      register: openbsd_packages
+
+    - name: Save installed packages to a file on OpenBSD
+      copy:
+        content: "{{ openbsd_packages.stdout }}"
+        dest: "/tmp/installed_software_{{ inventory_hostname }}.txt"
+
+    - name: Fetch installed software information from OpenBSD to control node
+      fetch:
+        src: "/tmp/installed_software_{{ inventory_hostname }}.txt"
+        dest: "./installed_software_reports/"
+        flat: yes
+
