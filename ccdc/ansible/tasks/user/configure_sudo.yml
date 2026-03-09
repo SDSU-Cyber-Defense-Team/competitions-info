@@ -1,0 +1,38 @@
+- name: Add to sudo group (Debian)
+  user:
+    name: "{{ admin_user }}"
+    groups: sudo
+    append: true
+  when: ansible_os_family == "Debian"
+
+- name: Add to wheel group (RHEL)
+  user:
+    name: "{{ admin_user }}"
+    groups: wheel
+    append: true
+  when: ansible_os_family == "RedHat"
+
+- name: Check for docker group
+  getent:
+    database: group
+    key: docker
+  register: docker_group_check
+  failed_when: false
+
+- name: Add to docker group if present
+  user:
+    name: "{{ admin_user }}"
+    groups: docker
+    append: true
+  when:
+    - not docker_group_check.failed
+    - docker_group_check.ansible_facts.getent_group is defined
+
+- name: Configure passwordless sudo for rsync
+  copy:
+    dest: "/etc/sudoers.d/{{ admin_user }}"
+    content: "{{ admin_user }} ALL=(ALL) NOPASSWD: /usr/bin/rsync\n"
+    owner: root
+    group: root
+    mode: '0440'
+    validate: 'visudo -cf %s'

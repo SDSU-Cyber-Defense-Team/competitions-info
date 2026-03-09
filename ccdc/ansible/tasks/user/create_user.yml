@@ -1,0 +1,29 @@
+- name: Ensure sudo and rsync are installed
+  package:
+    name:
+      - sudo
+      - rsync
+    state: present
+
+- name: Ensure group exists
+  group:
+    name: "{{ admin_user }}"
+    state: present
+
+- name: Create admin user
+  user:
+    name: "{{ admin_user }}"
+    group: "{{ admin_user }}"
+    shell: "{{ admin_shell }}"
+    create_home: true
+    password: "{{ admin_password | password_hash('sha512') }}"
+    update_password: on_create
+    state: present
+
+- name: Ensure .ssh directory exists
+  file:
+    path: "/home/{{ admin_user }}/.ssh"
+    state: directory
+    owner: "{{ admin_user }}"
+    group: "{{ admin_user }}"
+    mode: '0700'

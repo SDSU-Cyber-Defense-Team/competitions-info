@@ -1,0 +1,95 @@
+- name: Set rotation key path
+  set_fact:
+    rotated_key_path: "{{ ssh_key_dir }}/rotated/id_{{ ssh_key_type }}_{{ ansible_date_time.epoch }}"
+  run_once: true
+
+- name: Ensure rotated key directory exists
+  delegate_to: localhost
+  become: false
+  run_once: true
+  file:
+    path: "{{ ssh_key_dir }}/rotated"
+    state: directory
+    mode: '0700'
+
+- name: Generate new keypair
+  delegate_to: localhost
+  become: false
+  run_once: true
+  community.crypto.openssh_keypair:
+    backend: opensshbin
+    path: "{{ rotated_key_path }}"
+    type: "{{ ssh_key_type }}"
+    passphrase: "{{ admin_ssh_passphrase }}"
+    comment: "{{ admin_user }}@ansible-rotated"
+    state: present
+    force: false
+
+- name: Deploy new public key
+  ansible.posix.authorized_key:
+    user: "{{ admin_user }}"
+    key: "{{ lookup('file', rotated_key_path + '.pub') }}"
+    state: present
+    manage_dir: true
+
+- name: Verify connectivity with new key
+  delegate_to: localhost
+  become: false
+  command: >
+    ssh -i {{ rotated_key_path }}
+    -o StrictHostKeyChecking=no
+    -o BatchMode=yes
+    {{ admin_user }}@{{ ansible_host }}
+    echo ok
+  register: verify_result
+  changed_when: false
+
+- name: Remove old key from authorized_keys
+  ansible.posix.authorized_key:
+    user: "{{ admin_user }}"
+    key: "{{ lookup('file', ssh_key_dir + '/id_' + ssh_key_type + '.pub') }}"
+    state: absent
+  when: verify_result.rc == 0
+
+- name: Ensure archive directory exists
+  delegate_to: localhost
+  become: false
+  run_once: true
+  file:
+    path: "{{ ssh_key_dir }}/archive"
+    state: directory
+    mode: '0700'
+
+- name: Archive old private key
+  delegate_to: localhost
+  become: false
+  run_once: true
+  command: mv {{ ssh_key_dir }}/id_{{ ssh_key_type }} {{ ssh_key_dir }}/archive/id_{{ ssh_key_type }}_{{ ansible_date_time.epoch }}
+  args:
+    removes: "{{ ssh_key_dir }}/id_{{ ssh_key_type }}"
+
+- name: Archive old public key
+  delegate_to: localhost
+  become: false
+  run_once: true
+  command: mv {{ ssh_key_dir }}/id_{{ ssh_key_type }}.pub {{ ssh_key_dir }}/archive/id_{{ ssh_key_type }}_{{ ansible_date_time.epoch }}.pub
+  args:
+    removes: "{{ ssh_key_dir }}/id_{{ ssh_key_type }}.pub"
+
+- name: Promote new private key to active
+  delegate_to: localhost
+  become: false
+  run_once: true
+  copy:
+    src: "{{ rotated_key_path }}"
+    dest: "{{ ssh_key_dir }}/id_{{ ssh_key_type }}"
+    mode: '0600'
+
+- name: Promote new public key to active
+  delegate_to: localhost
+  become: false
+  run_once: true
+  copy:
+    src: "{{ rotated_key_path }}.pub"
+    dest: "{{ ssh_key_dir }}/id_{{ ssh_key_type }}.pub"
+    mode: '0644'

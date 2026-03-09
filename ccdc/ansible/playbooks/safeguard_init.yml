@@ -1,0 +1,30 @@
+---
+# ansible-playbook playbooks/safeguard_init.yml --ask-vault-pass
+# For testing with a non-root sudo user (e.g. cloud-init): add -e "ansible_user=<initial_user>"
+# Note: ansible_become_password must match that user's sudo password, not admin_password
+# Then load key: ssh-add ssh_keys/safeguard_admin/id_ed25519
+- name: Initialize admin user and SSH access
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    ansible_user: root
+    ansible_ssh_pass: "{{ initial_password }}"
+    ansible_ssh_private_key_file: ""
+
+  tasks:
+    - name: Create admin user
+      include_tasks: ../tasks/user/create_user.yml
+
+    - name: Configure sudo and groups
+      include_tasks: ../tasks/user/configure_sudo.yml
+
+    - name: Generate SSH keypair
+      include_tasks: ../tasks/ssh/generate_keypair.yml
+
+    - name: Deploy public key
+      include_tasks: ../tasks/ssh/deploy_pubkey.yml
+
+    - name: Init complete
+      debug:
+        msg: "Done. Run: ssh-add {{ ssh_key_dir }}/id_{{ ssh_key_type }}"

@@ -1,0 +1,5 @@
+# ansible-vault encrypt group_vars/all/vault.yml
+#
+# initial_password: ""     # <- root password (or initial user password for testing)
+# admin_password: ""       # <- password for the created admin account
+# admin_ssh_passphrase: "" # <- passphrase for the SSH keypair

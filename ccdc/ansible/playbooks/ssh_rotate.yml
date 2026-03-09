@@ -1,0 +1,11 @@
+---
+# ansible-playbook playbooks/ssh_rotate.yml --ask-vault-pass
+# Requires active key loaded in ssh-agent before running.
+- name: Rotate SSH keypair
+  hosts: all
+  become: false
+  gather_facts: true
+
+  tasks:
+    - name: Rotate key
+      include_tasks: ../tasks/ssh/rotate_key.yml

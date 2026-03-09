@@ -1,0 +1,21 @@
+- name: Ensure local key directory exists
+  delegate_to: localhost
+  become: false
+  run_once: true
+  file:
+    path: "{{ ssh_key_dir }}"
+    state: directory
+    mode: '0700'
+
+- name: Generate SSH keypair
+  delegate_to: localhost
+  become: false
+  run_once: true
+  community.crypto.openssh_keypair:
+    backend: opensshbin
+    path: "{{ ssh_key_dir }}/id_{{ ssh_key_type }}"
+    type: "{{ ssh_key_type }}"
+    passphrase: "{{ admin_ssh_passphrase }}"
+    comment: "{{ admin_user }}@ansible"
+    state: present
+    force: false

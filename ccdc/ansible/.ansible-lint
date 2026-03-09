@@ -1,0 +1,6 @@
+offline: true
+skip_list:
+  - yaml[truthy]
+  - yaml[line-length]
+  - name[casing]
+  - fqcn[action-core]

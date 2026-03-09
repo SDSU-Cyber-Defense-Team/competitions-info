@@ -1,0 +1,6 @@
+- name: Deploy SSH public key
+  ansible.posix.authorized_key:
+    user: "{{ admin_user }}"
+    key: "{{ lookup('file', ssh_key_dir + '/id_' + ssh_key_type + '.pub') }}"
+    state: present
+    manage_dir: true

@@ -1,0 +1,4 @@
+admin_user: failsafe
+admin_shell: /bin/bash
+ssh_key_type: ed25519
+ssh_key_dir: "{{ inventory_dir }}/ssh_keys/{{ admin_user }}"

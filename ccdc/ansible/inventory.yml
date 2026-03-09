@@ -1,0 +1,14 @@
+all:
+  hosts:
+    server1:
+      ansible_host: 192.168.0.163
+    server2:
+      ansible_host: 192.168.0.185
+
+  vars:
+    ansible_user: "{{ admin_user }}"
+    ansible_ssh_pass: "{{ admin_password }}"
+    ansible_ssh_private_key_file: "{{ ssh_key_dir }}/id_{{ ssh_key_type }}"
+    ansible_become: true
+    ansible_become_method: sudo
+    ansible_become_password: "{{ admin_password }}"
