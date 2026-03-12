@@ -48,7 +48,7 @@ Edit `group_vars/all/vars.yml` to change `admin_user` if needed.
 
 ### Pre-bootstrap connectivity test
 ```bash
-ansible all -m ping --ask-vault-pass
+ansible all -m ping --ask-vault-pass -e "ansible_user=root" -e "ansible_ssh_private_key_file=''" -e "ansible_ssh_pass={{ initial_password }}"
 ```
 
 ### Bootstrap (competition - root access)
