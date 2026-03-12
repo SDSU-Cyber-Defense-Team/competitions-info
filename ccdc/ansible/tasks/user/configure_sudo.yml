@@ -28,11 +28,3 @@
     - not docker_group_check.failed
     - docker_group_check.ansible_facts.getent_group is defined
 
-- name: Configure passwordless sudo for rsync
-  copy:
-    dest: "/etc/sudoers.d/{{ admin_user }}"
-    content: "{{ admin_user }} ALL=(ALL) NOPASSWD: /usr/bin/rsync\n"
-    owner: root
-    group: root
-    mode: '0440'
-    validate: 'visudo -cf %s'

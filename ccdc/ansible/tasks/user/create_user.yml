@@ -2,7 +2,6 @@
   package:
     name:
       - sudo
-      - rsync
     state: present
 
 - name: Ensure group exists
