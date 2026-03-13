@@ -1,0 +1,79 @@
+<!-- Local rules -->
+
+<!-- Modify it at your will. -->
+<!-- Copyright (C) 2015, Wazuh Inc. -->
+
+<group name="local,syslog,sshd,">
+  <rule id="100001" level="5">
+    <if_sid>5716</if_sid>
+    <srcip>1.1.1.1</srcip>
+    <description>sshd: authentication failed from IP 1.1.1.1.</description>
+    <group>authentication_failed,pci_dss_10.2.4,pci_dss_10.2.5,</group>
+  </rule>
+</group>
+
+<!-- Service start/stop/restart detection -->
+<group name="local,systemd,service_monitor,">
+
+  <rule id="100100" level="3">
+    <if_sid>40700</if_sid>
+    <match>Started </match>
+    <description>Systemd: Service started</description>
+    <group>service_start,</group>
+  </rule>
+
+  <rule id="100101" level="5">
+    <if_sid>40700</if_sid>
+    <match>Stopped </match>
+    <description>Systemd: Service stopped</description>
+    <group>service_stop,</group>
+  </rule>
+
+  <rule id="100102" level="3">
+    <if_sid>40700</if_sid>
+    <match>Reloading </match>
+    <description>Systemd: Service reloading</description>
+    <group>service_reload,</group>
+  </rule>
+
+  <rule id="100103" level="3">
+    <if_sid>40700</if_sid>
+    <match>Starting </match>
+    <description>Systemd: Service starting</description>
+    <group>service_start,</group>
+  </rule>
+
+  <rule id="100104" level="5">
+    <if_sid>40700</if_sid>
+    <match>Stopping </match>
+    <description>Systemd: Service stopping</description>
+    <group>service_stop,</group>
+  </rule>
+
+</group>
+
+<!-- Process execution from suspicious paths -->
+<group name="local,audit,suspicious_process,">
+
+  <rule id="100200" level="10">
+    <if_group>audit_command</if_group>
+    <match>/tmp/</match>
+    <description>Process executed from /tmp/ - possible red team tool</description>
+    <group>suspicious_process,</group>
+  </rule>
+
+  <rule id="100201" level="10">
+    <if_group>audit_command</if_group>
+    <match>/dev/shm/</match>
+    <description>Process executed from /dev/shm/ - possible red team tool</description>
+    <group>suspicious_process,</group>
+  </rule>
+
+  <rule id="100202" level="10">
+    <if_group>audit_command</if_group>
+    <match>/var/tmp/</match>
+    <description>Process executed from /var/tmp/ - possible red team tool</description>
+    <group>suspicious_process,</group>
+  </rule>
+
+</group>
