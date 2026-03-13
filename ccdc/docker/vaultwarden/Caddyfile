@@ -1,0 +1,6 @@
+# replace with operational ip:port
+localhost:443 {
+    tls internal
+    reverse_proxy vaultwarden:80
+}
+
