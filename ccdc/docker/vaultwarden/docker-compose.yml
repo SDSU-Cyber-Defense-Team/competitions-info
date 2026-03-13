@@ -1,0 +1,24 @@
+services:
+  vaultwarden:
+    image: vaultwarden/server:latest
+    container_name: vaultwarden
+    restart: always
+    environment:
+      - SIGNUPS_ALLOWED=true
+      - ROCKET_PORT=80
+    volumes:
+      - ./vaultwarden:/data
+  caddy:
+      image: caddy:2-alpine
+      container_name: caddy
+      restart: always
+      ports:
+        - 8080:443 #adjust port map as needed
+      environment:
+        - VAULTWARDEN_URL=vaultwarden
+      volumes:
+        - ${PWD}/Caddyfile:/etc/caddy/Caddyfile:ro
+        - ./caddy-data:/data
+      depends_on:
+        - vaultwarden
+
