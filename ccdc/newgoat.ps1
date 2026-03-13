@@ -1,12 +1,13 @@
 <#
-goat.ps1
+newgoat.ps1
 - made by Dashell Finn last updated mar 2026
 - always a WIP script, there is always more I want to add.
-- added windows defender registry search thing
-- added pii search (gpt'd the ssh stuff, probably doesnt work for linux machines yet)
-- ports enumeration version numbers now work, I think
-- added some random stuff from some schools at the top. Also added ntlmv1 fixes. For some reason hardeningkitty still says smbv1 is enabled?!?
-- TEST THIS A WHOLE BUNCH PLEASE. FIX IT A WHOLE BUNCH PLEASE. it will prob be me bugfixing tho.
+- added windows defender registry search thing, still lags out at end...
+- added pii search, not sure if im looking in the right directories
+- ports enumeration version numbers now work
+- added some random stuff from some schools at the top. Also added ntlmv1 fixes.
+- I debugged it a bunch, only things that seem to cause issues are the Defender search and the registry backup thing, they either hang or take to long but for defender it at least works.
+- if it ever stalls just send a newline and its usually fine (usually happens on port enum, should be almost instant)
 #>
 
 
@@ -26,6 +27,62 @@ function Read-YesNo([string]$message, [bool]$default=$true) {
         if ([string]::IsNullOrWhiteSpace($in)) { return $default }
         switch ($in.ToLower()) { 'y' { return $true } 'yes' { return $true } 'n' { return $false } 'no' { return $false } default { Write-Host "Please answer Y or N." -ForegroundColor Yellow } }
     }
+}
+
+
+# ssh helpers
+function Escape-BashSingle([string]$s) {
+    if ($null -eq $s) { return "''" }
+    return "'" + ($s -replace "'", "'\''") + "'"
+}
+
+function Invoke-SshScriptB64 {
+    param(
+        [Parameter(Mandatory=$true)][string]$SshBin,
+        [Parameter(Mandatory=$true)][string]$User,
+        [Parameter(Mandatory=$true)][string]$TargetHost,
+        [Parameter(Mandatory=$true)][string]$ScriptText,
+        [string[]]$Args = @()
+    )
+
+    $argStr = if ($Args -and $Args.Count -gt 0) { ($Args | ForEach-Object { Escape-BashSingle $_ }) -join ' ' } else { "" }
+    $remoteCmd = if ([string]::IsNullOrWhiteSpace($argStr)) { "sh -s" } else { "sh -s -- $argStr" }
+
+    $sshArgs = @(
+        "-T",
+        "-l", $User,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=NUL",
+        "-o", "GlobalKnownHostsFile=NUL",
+        "-o", "LogLevel=ERROR",
+        $TargetHost,
+        $remoteCmd
+    )
+
+    # send script over STDIN (PowerShell-safe)
+    $payload = ($ScriptText -replace "`r","")
+
+   $oldOE = $OutputEncoding
+    try {
+        $OutputEncoding = [System.Text.Encoding]::UTF8
+
+        # Run ssh, then FORCE everything into string[] (no ErrorRecord objects leak out)
+        $raw = $payload | & $SshBin @sshArgs 2>&1
+        return @($raw | ForEach-Object { [string]$_ })
+    }
+    finally {
+        $OutputEncoding = $oldOE
+    }
+}
+
+
+function Remove-AnsiAndControls([string]$s) {
+    if ($null -eq $s) { return $s }
+    # ANSI escapes
+    $s = $s -replace "`e\[[0-9;]*[A-Za-z]", ""
+    # other control chars (keep CR/LF/TAB)
+    $s = $s -replace "[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", ""
+    return $s
 }
 
 
@@ -478,15 +535,10 @@ if (Read-YesNo "Apply SAFE local hardening on THIS Domain Controller only?" $tru
 
 
 # =========================================================
-# Ports & Services (Deep Config Inventory)  -- FIXED SSH
+# Ports & Services (Deep Config Inventory)  -- FIXED SSH + FIXED BRACES
 # =========================================================
 Write-Section "Ports & Services (Deep Config Inventory)"
 $doScan = Read-YesNo "Enumerate listening ports with Config/Path Discovery + Version Enumeration?" $true
-
-function Escape-BashDouble([string]$s) {
-    # Escapes content for: bash -lc "<HERE>"
-    ($s -replace '\\','\\\\' -replace '"','\"')
-}
 
 if ($doScan) {
     $wellKnownOnly = Read-YesNo "Only show well-known ports (<= 49151)?" $false
@@ -495,7 +547,7 @@ if ($doScan) {
     try { Import-Module ActiveDirectory -ErrorAction Stop }
     catch { Write-Host "[WARN] RSAT AD Module missing." -ForegroundColor Yellow; return }
 
-    # Find SSH Binary
+    # Find SSH Binary (for Linux targets)
     $sshBin = "ssh.exe"
     if (-not (Get-Command ssh.exe -ErrorAction SilentlyContinue)) {
         $customPath = "C:\Users\Administrator\openssh\OpenSSH-Win64\ssh.exe"
@@ -510,7 +562,7 @@ if ($doScan) {
     }
 
     Write-Host "[INFO] Querying Active Directory..." -ForegroundColor Cyan
-    $comps = Get-ADComputer -Filter "Enabled -eq 'True'" -Properties "DNSHostName", "OperatingSystem"
+    $comps = Get-ADComputer -Filter "Enabled -eq 'True'" -Properties "DNSHostName", "OperatingSystem", "Name"
     Write-Host ("[INFO] Targets found: {0}" -f $comps.Count)
 
     # --- WINDOWS PORT ENUM (REMOTE SCRIPTBLOCK) ---
@@ -549,14 +601,11 @@ if ($doScan) {
             return $null
         }
 
-        # --- A. Collect Raw Data ---
         $allProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
         $allSvcs  = Get-CimInstance Win32_Service -ErrorAction SilentlyContinue
         $netstat  = & netstat -ano 2>$null
 
-        # --- B. IIS / Web Config Discovery ---
         $webMap = @{}
-
         if (Get-Module -ListAvailable WebAdministration) {
             try {
                 Import-Module WebAdministration -ErrorAction SilentlyContinue
@@ -565,9 +614,6 @@ if ($doScan) {
                     foreach ($site in $sites) {
                         $path = $null
                         try { $path = $site.physicalPath } catch {}
-                        if (-not $path) {
-                            try { $path = (Get-ItemProperty $site.PSPath -Name physicalPath -ErrorAction SilentlyContinue).physicalPath } catch {}
-                        }
                         if (-not $path) { $path = "Unknown Path" }
 
                         if ($site.bindings -and $site.bindings.Collection) {
@@ -586,34 +632,6 @@ if ($doScan) {
             } catch { }
         }
 
-        if ((Test-Path "$env:SystemRoot\system32\inetsrv\appcmd.exe")) {
-            try {
-                $appCmd = "$env:SystemRoot\system32\inetsrv\appcmd.exe"
-                $siteOut = & $appCmd list site
-                $vdirOut = & $appCmd list vdir
-
-                foreach ($line in $siteOut) {
-                    if ($line -match 'SITE "([^"]+)" .*bindings:([^,]+)') {
-                        $siteName = $matches[1]
-                        $bindStr  = $matches[2]
-
-                        $sitePath = "Unknown Path"
-                        $escapedName = [regex]::Escape($siteName)
-                        $vdirLine = $vdirOut | Where-Object { $_ -match "VDIR `"$escapedName/`"" } | Select-Object -First 1
-                        if ($vdirLine -match 'physicalPath:(.*)\)') { $sitePath = $matches[1] }
-
-                        if ($bindStr -match ':(\d+):') {
-                            $port = [int]$matches[1]
-                            if (-not $webMap.ContainsKey($port)) {
-                                $webMap[$port] = "IIS Site: '$siteName' -> $sitePath"
-                            }
-                        }
-                    }
-                }
-            } catch { }
-        }
-
-        # --- C. Processing Maps ---
         $procMap = @{}
         if ($allProcs) { foreach ($p in $allProcs) { $procMap[[int]$p.ProcessId] = $p } }
 
@@ -628,7 +646,6 @@ if ($doScan) {
 
         $iisVer = Get-IISVersionSummary
 
-        # --- D. Parse Ports & Build Output ---
         if ($netstat) {
             foreach ($line in $netstat) {
                 if ($line -match '^\s*(TCP|UDP)\s+(\S+):(\d+)\s+.*?\s+(\d+)') {
@@ -644,7 +661,6 @@ if ($doScan) {
                     $version  = $null
                     $exePath  = $null
 
-                    # 1) IIS/Web (IIS version + w3wp version)
                     if ($webMap.ContainsKey($port) -and ($pidVal -eq 4 -or ($procObj -and $procObj.Name -eq "w3wp.exe"))) {
                         $finalLoc = $webMap[$port]
                         $w3wpPath = $null
@@ -657,20 +673,14 @@ if ($doScan) {
                         elseif ($v1) { $version = $v1 }
                         elseif ($v2) { $version = $v2 }
                     }
-                    # 2) System/Kernel
                     elseif ($pidVal -eq 4 -or $pidVal -eq 0) {
                         $finalLoc = "System (Kernel/Drivers)"
-                        if ($port -in 445,139) { $finalLoc += " [SMB/Srv]" }
-                        if ($port -in 5985)    { $finalLoc += " [WinRM]" }
-                        if ($port -eq 47001)   { $finalLoc += " [WinRM/EventLog]" }
-
                         try {
                             $os = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -ErrorAction SilentlyContinue
                             if ($os -and $os.DisplayVersion) { $version = "Windows $($os.DisplayVersion) (Build $($os.CurrentBuildNumber))" }
                             elseif ($os -and $os.ReleaseId)  { $version = "Windows ReleaseId $($os.ReleaseId) (Build $($os.CurrentBuildNumber))" }
                         } catch { }
                     }
-                    # 3) Standard processes
                     elseif ($procObj) {
                         if (-not [string]::IsNullOrWhiteSpace($procObj.ExecutablePath)) {
                             $exePath = $procObj.ExecutablePath
@@ -687,50 +697,10 @@ if ($doScan) {
                             if ($v) { $version = $v }
                         }
                     }
-                    # 4) Fallback process lookup
-                    else {
-                        try {
-                            $p = Get-Process -Id $pidVal -ErrorAction SilentlyContinue
-                            if ($p) {
-                                $finalLoc = "$($p.ProcessName) [$($p.Path)]"
-                                $exePath = $p.Path
-                                if (-not $version) {
-                                    $v = Get-FileVersionSummary $exePath
-                                    if ($v) { $version = $v }
-                                }
-                            }
-                        } catch {}
-                        if ($finalLoc -eq "Unknown") { $finalLoc = "(unknown - PID $pidVal)" }
-                    }
 
-                    # Append Services if present + prefer DLL versions for svchost-style services
                     if ($svcList) {
                         $svcNames = ($svcList.Name | Sort-Object -Unique) -join ","
-                        if (-not ($finalLoc -match "IIS Site")) {
-                            $finalLoc += " ; svc=$svcNames"
-
-                            $dlls = @()
-                            foreach ($sName in $svcList.Name) {
-                                $rp = "HKLM:\SYSTEM\CurrentControlSet\Services\$sName\Parameters"
-                                try {
-                                    $v = (Get-ItemProperty -Path $rp -Name ServiceDll -ErrorAction SilentlyContinue).ServiceDll
-                                    if ($v) { $dlls += $v }
-                                } catch {}
-                            }
-
-                            $dlls = $dlls | Sort-Object -Unique
-                            if ($dlls) {
-                                $finalLoc += " ; DLL=" + ($dlls -join ",")
-                                if (-not $version -or $version -eq "N/A") {
-                                    $dllVers = @()
-                                    foreach ($d in $dlls) {
-                                        $vv = Get-FileVersionSummary $d
-                                        if ($vv) { $dllVers += "$([IO.Path]::GetFileName($d)) $vv" }
-                                    }
-                                    if ($dllVers) { $version = ($dllVers | Sort-Object -Unique) -join " ; " }
-                                }
-                            }
-                        }
+                        if (-not ($finalLoc -match "IIS Site")) { $finalLoc += " ; svc=$svcNames" }
                     }
 
                     if (-not $version) { $version = "N/A" }
@@ -740,7 +710,7 @@ if ($doScan) {
                         Port     = $port
                         Version  = $version
                         Location = $finalLoc
-                    })
+                    }) | Out-Null
                 }
             }
         }
@@ -749,13 +719,16 @@ if ($doScan) {
     }
 
     foreach ($comp in $comps) {
-        $target = $comp.DNSHostName
+        $target = if ($comp.DNSHostName) { $comp.DNSHostName } else { $comp.Name }
         $os     = $comp.OperatingSystem
 
         Write-Host "--------------------------------------------------------"
         Write-Host "Host: $target ($os)" -NoNewline
+
+        if (-not $target) { Write-Host " [SKIP: no hostname]" -ForegroundColor Yellow; continue }
         if (-not (Test-Connection $target -Count 1 -Quiet)) {
-            Write-Host " [OFFLINE]" -ForegroundColor Red; continue
+            Write-Host " [OFFLINE]" -ForegroundColor Red
+            continue
         }
         Write-Host " [ONLINE]" -ForegroundColor Green
 
@@ -763,165 +736,252 @@ if ($doScan) {
         $useSSH = ($os -match "Linux|Ubuntu|CentOS|Red Hat|Debian|Alpine") -or ($os -eq $null)
 
         if ($useSSH) {
-            if (-not $sshBin) { Write-Host "    [SKIP] No SSH binary available." -ForegroundColor DarkGray; continue }
+            if (-not $sshBin) {
+                Write-Host "    [SKIP] No SSH binary available." -ForegroundColor DarkGray
+                continue
+            }
 
             try {
-                $ssCmd = "ss -lntupH 2>/dev/null || netstat -lntup 2>/dev/null"
-                $psCmd = "ps -Ao pid,args 2>/dev/null || ps -o pid,args 2>/dev/null"
+                $splitMarker = "__GOAT_SPLIT__"
 
-                $verCmd = @'
-pids=$( (ss -lntupH 2>/dev/null || netstat -lntup 2>/dev/null) 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u )
+                $linuxRemoteScript = @'
+set +e
+# -------- version helpers --------
+firstline() { head -n1 | tr -d '\r'; }
+
+pkg_ver_from_file() {
+  f="$1"
+  [ -n "$f" ] || return 0
+
+  # Debian/Ubuntu
+  if command -v dpkg-query >/dev/null 2>&1; then
+    pkg=$(dpkg-query -S "$f" 2>/dev/null | firstline | cut -d: -f1)
+    if [ -n "$pkg" ]; then
+      dpkg-query -W -f='${Package} ${Version}\n' "$pkg" 2>/dev/null | firstline
+      return 0
+    fi
+  fi
+
+  # RHEL/CentOS/Fedora
+  if command -v rpm >/dev/null 2>&1; then
+    rpm -qf "$f" 2>/dev/null | firstline
+    return 0
+  fi
+
+  # Alpine
+  if command -v apk >/dev/null 2>&1; then
+    apk info -W "$f" 2>/dev/null | firstline
+    return 0
+  fi
+
+  return 0
+}
+
+safe_run() {
+  # run a command, return first line of stdout/stderr (trim CR)
+  # usage: safe_run /path/to/bin --version
+  "$@" 2>&1 | firstline
+}
+
+
+if command -v ss >/dev/null 2>&1; then
+  ss -lntupH 2>&1
+elif command -v netstat >/dev/null 2>&1; then
+  netstat -lntup 2>&1
+else
+  echo "__NO_SS_OR_NETSTAT__"
+fi
+
+echo "__GOAT_SPLIT__"
+
+ps -Ao pid,args 2>&1 || ps -o pid,args 2>&1
+
+echo "__GOAT_SPLIT__"
+
+pids=$(
+  { ss -lntupH 2>/dev/null || netstat -lntup 2>/dev/null; } 2>/dev/null |
+  sed -n -e 's/.*pid=\([0-9][0-9]*\).*/\1/p' -e 's/.* \([0-9][0-9]*\)\/[^ ]*$/\1/p' |
+  sort -u
+)
+
 for pid in $pids; do
   exe=$(readlink -f /proc/$pid/exe 2>/dev/null)
   base=$(basename "$exe" 2>/dev/null)
   v=""
 
   case "$base" in
-    sshd)       v=$(sshd -V 2>&1 | head -n1) ;;
-    nginx)      v=$(nginx -v 2>&1 | head -n1) ;;
-    apache2|httpd) v=$("$exe" -v 2>/dev/null | head -n1) ;;
-    mysqld)     v=$("$exe" --version 2>/dev/null | head -n1) ;;
-    postgres|postmaster) v=$("$exe" -V 2>/dev/null | head -n1) ;;
-    redis-server) v=$("$exe" --version 2>/dev/null | head -n1) ;;
-    node)       v=$("$exe" -v 2>/dev/null | head -n1) ;;
-    python|python3) v=$("$exe" --version 2>&1 | head -n1) ;;
-  esac
-
-  if [ -z "$v" ] && [ -n "$exe" ]; then
-    if command -v dpkg-query >/dev/null 2>&1; then
-      pkg=$(dpkg-query -S "$exe" 2>/dev/null | head -n1 | cut -d: -f1)
-      if [ -n "$pkg" ]; then
-        pv=$(dpkg-query -W -f='${Package} ${Version}\n' "$pkg" 2>/dev/null | head -n1)
+    # --- SSH ---
+    sshd)
+      v=""
+      if command -v dpkg-query >/dev/null 2>&1; then
+        pv=$(dpkg-query -W -f='${Version}\n' openssh-server 2>/dev/null | firstline)
+        [ -n "$pv" ] && v="openssh-server $pv"
+      elif command -v rpm >/dev/null 2>&1; then
+        pv=$(rpm -q openssh-server 2>/dev/null | firstline)
         [ -n "$pv" ] && v="$pv"
       fi
-    elif command -v rpm >/dev/null 2>&1; then
-      pv=$(rpm -qf "$exe" 2>/dev/null | head -n1)
-      [ -n "$pv" ] && v="$pv"
-    elif command -v apk >/dev/null 2>&1; then
-      pv=$(apk info -W "$exe" 2>/dev/null | head -n1)
-      [ -n "$pv" ] && v="$pv"
-    fi
+      [ -z "$v" ] && v=$(safe_run ssh -V)   # last resort
+      ;;
+
+    # --- web servers ---
+    nginx)                v=$(safe_run nginx -v) ;;
+    apache2|httpd)        v=$(safe_run "$exe" -v) ;;
+
+    # --- databases ---
+    mysqld)               v=$(safe_run "$exe" --version) ;;
+    postgres|postmaster)  v=$(safe_run "$exe" -V) ;;
+    redis-server)         v=$(safe_run "$exe" --version) ;;
+    mongod)               v=$(safe_run "$exe" --version) ;;
+
+    # --- runtimes ---
+    node)                 v=$(safe_run "$exe" -v) ;;
+    python|python3)       v=$(safe_run "$exe" --version) ;;
+    java)
+      # java prints to stderr; safe_run handles it
+      v=$(safe_run "$exe" -version)
+      ;;
+
+    # --- system / logging / time ---
+    systemd|systemd-resolved) v=$(safe_run "$exe" --version) ;;
+    rsyslogd)                 v=$(safe_run "$exe" -v) ;;
+    chronyd)                  v=$(safe_run "$exe" -v) ;;
+    avahi-daemon)             v=$(safe_run "$exe" --version) ;;
+
+    # --- containers ---
+    dockerd)              v=$(safe_run "$exe" --version) ;;
+    containerd)           v=$(safe_run "$exe" --version) ;;
+    docker-proxy)
+      # docker-proxy itself often has no version flag; report owning package if possible
+      v=$(pkg_ver_from_file "$exe")
+      [ -z "$v" ] && v=$(safe_run docker --version)
+      ;;
+
+    # --- object storage ---
+    minio)                v=$(safe_run "$exe" --version) ;;
+
+  esac
+
+  # Generic fallback: if we still don't have a version, try package ownership.
+  if [ -z "$v" ] || [ "$v" = "N/A" ]; then
+    pv=$(pkg_ver_from_file "$exe")
+    [ -n "$pv" ] && v="$pv"
   fi
 
   [ -z "$v" ] && v="N/A"
   echo "$pid|||$exe|||$v"
 done
+
+exit 0
 '@
 
-                # IMPORTANT: normalize CRLF + force remote nonzero not to look like auth failure
-                $verCmdClean = ($verCmd -replace "`r","") -replace "`n","; "
+                Write-Host "    [INPUT] Connecting via SSH..." -ForegroundColor Cyan
+                $rawOut = Invoke-SshScriptB64 -SshBin $sshBin -User "root" -TargetHost $target -ScriptText $linuxRemoteScript
+                $joined = Remove-AnsiAndControls (($rawOut -join "`n"))
 
-                $remote = "set +e; $ssCmd; echo '|||'; $psCmd; echo '|||'; $verCmdClean; exit 0"
-                $remoteEsc = Escape-BashDouble $remote
-
-                $sshArgs = @(
-                    "-tt",
-                    "-l","root",
-                    "-o","StrictHostKeyChecking=no",
-                    "-o","UserKnownHostsFile=/dev/null",
-                    $target,
-                    "bash -lc `"$remoteEsc`""
-                )
-
-                Write-Host "    [INPUT] Connecting to $target..." -NoNewline -ForegroundColor Cyan
-                $rawOut = & $sshBin @sshArgs 2>&1
-                Write-Host ""
-
-                if (-not $rawOut) { throw "No SSH output received." }
-
-                # Real auth failure detection (instead of only exit code)
-                $joined = ($rawOut -join "`n")
-                if ($joined -match "(?i)permission denied") {
-                    Write-Host "    [FAIL] SSH Permission denied (bad creds OR root login blocked)." -ForegroundColor Red
-                    continue
-                }
-                if ($joined -match "(?i)could not resolve hostname|name or service not known") {
-                    Write-Host "    [FAIL] SSH DNS/hostname resolution failed." -ForegroundColor Red
-                    continue
-                }
-                if ($joined -match "(?i)connection timed out|no route to host|connection refused") {
-                    Write-Host "    [FAIL] SSH network/connectivity failure." -ForegroundColor Red
+                $mk = [regex]::Escape($splitMarker)
+                $parts = $joined -split "(?m)^$mk\s*$"
+                if ($parts.Count -lt 3) {
+                    Write-Host "    [FAIL] Remote output missing split markers. Raw output (first 80 lines):" -ForegroundColor Yellow
+                    ($joined -split "`n" | Select-Object -First 80) | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkYellow }
                     continue
                 }
 
-                $outStr  = $joined
-                $parts   = $outStr -split "\|\|\|"
-                $ssOut   = $parts[0] -split "`n"
-                $psOut   = if ($parts.Count -gt 1) { $parts[1] -split "`n" } else { @() }
-                $verOut  = if ($parts.Count -gt 2) { $parts[2] -split "`n" } else { @() }
+                $ssOut  = $parts[0] -split "`n"
+                $psOut  = $parts[1] -split "`n"
+                $verOut = $parts[2] -split "`n"
 
                 $linuxProcMap = @{}
                 foreach ($pLine in $psOut) {
-                    $pLine = $pLine.Trim()
-                    if ($pLine -match '^(\d+)\s+(.*)') { $linuxProcMap[[int]$matches[1]] = $matches[2] }
+                    $t = $pLine.Trim()
+                    if ($t -match '^(\d+)\s+(.*)$') { $linuxProcMap[[int]$matches[1]] = $matches[2] }
                 }
 
                 $linuxVerMap = @{}
+                $linuxExeMap = @{}
                 foreach ($vLine in $verOut) {
-                    $vLine = $vLine.Trim()
-                    if ($vLine -match '^(\d+)\|\|\|.*\|\|\|(.*)$') {
-                        $linuxVerMap[[int]$matches[1]] = $matches[2].Trim()
+                    $t = $vLine.Trim()
+                    if ($t -match '^(\d+)\|\|\|([^|]+)\|\|\|(.*)$') {
+                        $pidNum = [int]$matches[1]
+                        $linuxExeMap[$pidNum] = $matches[2].Trim()
+                        $linuxVerMap[$pidNum] = $matches[3].Trim()
                     }
                 }
 
                 foreach ($line in $ssOut) {
-                    $line = $line.Trim()
-                    if ($line -match '^(tcp|udp)\s+.*?:(\d+)\s+.*users:\(\("([^"]+)",(?:pid=)?(\d+)') {
-                        $proto = $matches[1]; $port = [int]$matches[2]; $procID = [int]$matches[4]
-                        $fullPath = $linuxProcMap[$procID]; if (-not $fullPath) { $fullPath = $matches[3] }
-                        $ver = $linuxVerMap[$procID]; if (-not $ver) { $ver = "N/A" }
-                        $data += [pscustomobject]@{ Proto=$proto.ToUpper(); Port=$port; Version=$ver; Location=$fullPath }
-                    }
-                    elseif ($line -match '^(tcp|udp)\s+.*?[:\s](\d+)\s+.*LISTEN\s+(\d+)/(\S+)') {
-                        $proto = $matches[1]; $port = [int]$matches[2]; $procID = [int]$matches[3]
-                        $fullPath = $linuxProcMap[$procID]; if (-not $fullPath) { $fullPath = $matches[4] }
-                        $ver = $linuxVerMap[$procID]; if (-not $ver) { $ver = "N/A" }
-                        $data += [pscustomobject]@{ Proto=$proto.ToUpper(); Port=$port; Version=$ver; Location=$fullPath }
+                    $t = $line.Trim()
+                    if (-not $t) { continue }
+
+                    if ($t -match '^(tcp6?|udp6?)\s+.*?:(\d+)\s+.*users:\(\("([^"]+)",pid=(\d+)') {
+                        $proto  = ($matches[1] -replace '6$','').ToUpper()
+                        $port   = [int]$matches[2]
+                        $procId = [int]$matches[4]
+
+                        $loc = $linuxProcMap[$procId]
+                        if (-not $loc) { $loc = $matches[3] }
+
+                        $exePath = $linuxExeMap[$procId]
+
+                        $ver = $linuxVerMap[$procId]
+                        if (-not $ver) { $ver = "N/A" }
+
+                        # If ps output doesn't include a real path, prepend the exe path
+                        if ($exePath -and ($loc -notmatch '/')) {
+                            $loc = "$exePath ; $loc"
+                        }
+
+                        $data += [pscustomobject]@{
+                            Proto    = $proto
+                            Port     = $port
+                            Version  = $ver
+                            Location = $loc
+                        }
                     }
                 }
-
-            } catch {
+            }
+            catch {
                 Write-Host "    [FAIL] SSH Error: $($_.Exception.Message)" -ForegroundColor Yellow
+                continue
             }
         }
         else {
+            # Windows target
             try {
                 $data = Invoke-Command -ComputerName $target -ScriptBlock $windowsScriptBlock -ErrorAction Stop
-            } catch {
-                Write-Host "    [FAIL] WinRM Error: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+            catch {
+                Write-Host "    [FAIL] WinRM/Invoke-Command error: $($_.Exception.Message)" -ForegroundColor Yellow
+                continue
             }
         }
 
-        if ($wellKnownOnly) { $data = $data | Where-Object { $_.Port -le 49151 } }
+        if ($wellKnownOnly) { $data = @($data | Where-Object { $_.Port -le 49151 }) }
 
-        # --- DISPLAY (includes Version) ---
-        if ($data) {
-            $data | Sort-Object {[int]$_.Port} | Group-Object Port | ForEach-Object {
-                $group = $_.Group
-                $port  = [int]$_.Name
+        $data = @($data | Sort-Object Proto, Port, Version, Location -Unique)
 
-                $hasTCP = ($group.Proto -contains "TCP")
-                $hasUDP = ($group.Proto -contains "UDP")
-                $protoDisplay = if ($hasTCP -and $hasUDP) { "TCP+UDP" } elseif ($hasTCP) { "TCP" } else { "UDP" }
 
-                $bestLocObj = $group | Where-Object { $_.Location -and $_.Location -ne "Unknown" } | Select-Object -First 1
-                $loc = if ($bestLocObj) { $bestLocObj.Location } else { $group[0].Location }
-
-                $bestVerObj = $group | Where-Object { $_.Version -and $_.Version -ne "N/A" } | Select-Object -First 1
-                $ver = if ($bestVerObj) { $bestVerObj.Version } else { $group[0].Version }
-                if (-not $ver) { $ver = "N/A" }
-                if ($ver.Length -gt 45) { $ver = $ver.Substring(0,45) + "..." }
-
-                $cat = Get-PortCat -Port $port -Loc $loc
-                Write-Host ("    {0,-15} | {1,-12} | {2,-50} | {3}" -f "$port/$protoDisplay", $cat, $ver, $loc)
-            }
-        } else {
-            Write-Host "    [INFO] No ports found (or access denied)." -ForegroundColor Gray
+        if (-not $data -or $data.Count -eq 0) {
+            Write-Host "    [INFO] No listening ports found." -ForegroundColor DarkGray
+            continue
         }
 
-        Write-Host "    [OK] Enumeration complete." -ForegroundColor Green
-    }
+        # Add category + print
+        $out = foreach ($row in ($data | Sort-Object Port, Proto)) {
+            [pscustomobject]@{
+                Proto    = $row.Proto
+                Port     = $row.Port
+                Category = (Get-PortCat -Port $row.Port -Loc $row.Location)
+                Version  = $row.Version
+                Location = $row.Location
+            }
+        }
+
+        $out | Format-Table -AutoSize
+    } # <-- closes foreach ($comp in $comps)
+
+} else {
+    Write-Host "[SKIP] Ports & Services scan" -ForegroundColor DarkGray
 }
+
 
 
 
@@ -1397,73 +1457,69 @@ if (Read-YesNo "Scan ALL domain computers (Windows via WinRM, Linux via SSH) for
     # IMPORTANT: DO NOT use param name "Host" (conflicts with read-only $Host)
     # =========================================================
     function Invoke-LinuxPiiScan {
-        param(
-            [Parameter(Mandatory=$true)][string]$TargetHost,
-            [Parameter(Mandatory=$true)][int]$MaxFileKB
-        )
+    param(
+        [Parameter(Mandatory=$true)][string]$TargetHost,
+        [Parameter(Mandatory=$true)][int]$MaxFileKB
+    )
 
-        $regex = '([0-9]{3}[)]?[- .|][0-9]{3}[- .|][0-9]{4}|[0-9]{3}[- .|][0-9]{2}[- .|][0-9]{4}|[Aa]ve|[Aa]venue|[Ss]t|[Ss]treet|[Bb]lvd|[Bb]oulevard|[Rr]d|[Rr]oad|[Dd]r|[Dd]rive|[Cc]t|[Cc]ourt|[Hh]wy|[Hh]ighway|[Ll]n|[Ll]ane|[Ww]ay|[Ii]nterstate)'
+    $regex = '([0-9]{3}[)]?[- .|][0-9]{3}[- .|][0-9]{4}|[0-9]{3}[- .|][0-9]{2}[- .|][0-9]{4}|[Aa]ve|[Aa]venue|[Ss]t|[Ss]treet|[Bb]lvd|[Bb]oulevard|[Rr]d|[Rr]oad|[Dd]r|[Dd]rive|[Cc]t|[Cc]ourt|[Hh]wy|[Hh]ighway|[Ll]n|[Ll]ane|[Ww]ay|[Ii]nterstate)'
+    $paths = "/home/*/Downloads /home/*/Documents /home/*/Desktop /var/www"
 
-        # Keep linux scan set tight for speed
-        $paths = "/home/*/Downloads /home/*/Documents /home/*/Desktop /var/www"
-
-        $remote = @"
-bash -lc '
-MAX_KB=$MaxFileKB
-RE="$regex"
-PATHS="$paths"
+    $script = @'
+set +e
+MAX_KB="$1"
+RE="$2"
+PATHS="$3"
 
 scan_path() {
-  p="`$1"
-  find `$p -type f -size -"`$MAX_KB`"k -print0 2>/dev/null | while IFS= read -r -d "" f; do
-    [ -r "`$f" ] || continue
-    grep -Iq . "`$f" 2>/dev/null || continue
+  p="$1"
+  find $p -type f -size -"${MAX_KB}"k -print0 2>/dev/null | while IFS= read -r -d "" f; do
+    [ -r "$f" ] || continue
+    grep -Iq . "$f" 2>/dev/null || continue
 
-    out=`$(grep -IEo "`$RE" "`$f" 2>/dev/null | awk "NR<=3{gsub(/\\r/,\"\",`$0); s=(s? s\" | \":\"\")`$0} {c++} END{if(c>0) print c\"|||\"s }")
-    if [ -n "`$out" ]; then
-      sz=`$(stat -c%s "`$f" 2>/dev/null || wc -c < "`$f" 2>/dev/null)
-      echo "HIT|||`$f|||`$sz|||`$out"
+    out=$(grep -IEo "$RE" "$f" 2>/dev/null | awk 'NR<=3{gsub(/\r/,""); s=(s? s" | ":"")$0} {c++} END{if(c>0) print c"|||" (s?s:"") }')
+    if [ -n "$out" ]; then
+      sz=$(stat -c%s "$f" 2>/dev/null || wc -c < "$f" 2>/dev/null)
+      echo "HIT|||$f|||$sz|||$out"
     fi
   done
 }
 
-for p in `$PATHS; do
-  scan_path "`$p"
+for p in $PATHS; do
+  scan_path "$p"
 done
 
 exit 0
-'
-"@
+'@
 
-        $sshArgs = @(
-            "-tt",
-            "-l",$LinuxUser,
-            "-o","StrictHostKeyChecking=no",
-            "-o","UserKnownHostsFile=/dev/null",
-            $TargetHost,
-            $remote
-        )
+    Write-Host "    [INPUT] SSH to $TargetHost (Linux). You may be prompted for a password..." -ForegroundColor Cyan
+    $out = Invoke-SshScriptB64 -SshBin $sshBin -User $LinuxUser -TargetHost $TargetHost -ScriptText $script -Args @("$MaxFileKB", $regex, $paths)
 
-        Write-Host "    [INPUT] SSH to $TargetHost (Linux). You may be prompted for a password..." -ForegroundColor Cyan
-        $out = & $sshBin @sshArgs 2>&1
-        $joined = ($out -join "`n")
+    $joined = Remove-AnsiAndControls ($out -join "`n")
+    if ($joined -match "(?i)permission denied") { throw "Permission denied (bad creds OR login blocked for '$LinuxUser')." }
+    if ($joined -match "(?i)could not resolve hostname|name or service not known") { throw "DNS/hostname resolution failed." }
+    if ($joined -match "(?i)connection timed out|no route to host|connection refused") { throw "Network/connectivity failure." }
 
-        if ($joined -match "(?i)permission denied") { throw "Permission denied (bad creds OR login blocked for '$LinuxUser')." }
-        if ($joined -match "(?i)could not resolve hostname|name or service not known") { throw "DNS/hostname resolution failed." }
-        if ($joined -match "(?i)connection timed out|no route to host|connection refused") { throw "Network/connectivity failure." }
+    $outLines = @($out | ForEach-Object { [string]$_ })
 
-        $results = @()
-        foreach ($line in $out) {
-            if ($line -match '^HIT\|\|\|(.*)\|\|\|(\d+)\|\|\|(\d+)\|\|\|(.*)$') {
-                $file = $matches[1].Trim()
-                $sz   = [int64]$matches[2]
-                $cnt  = [int]$matches[3]
-                $samp = $matches[4].Trim()
+    $results = @()
+    foreach ($line in $outLines) {
+        $t = ([string]$line).Trim()
+
+        if ($t -like 'HIT|||*') {
+            # HIT|||file|||size|||count|||sample
+            $parts = $t -split '\|\|\|', 5
+
+            if ($parts.Count -ge 5) {
+                $fp   = ([string]$parts[1]).Trim()
+                $sz   = [int64]([string]$parts[2])
+                $cnt  = [int]([string]$parts[3])
+                $samp = ([string]$parts[4]).Trim()
 
                 $results += [pscustomobject]@{
                     Platform   = "Linux"
                     Computer   = $TargetHost
-                    FilePath   = $file
+                    FilePath   = $fp
                     SizeBytes  = $sz
                     MatchCount = $cnt
                     Sample     = $samp
@@ -1471,38 +1527,54 @@ exit 0
                 }
             }
         }
-        return $results
     }
+    return $results
+}
 
-    function Invoke-LinuxQuarantine {
-        param([string]$TargetHost,[string]$FilePath,[string]$RunStamp)
+function Invoke-LinuxQuarantine {
+    param([string]$TargetHost,[string]$FilePath,[string]$RunStamp)
 
-        $cmd = @"
-bash -lc 'f="`$1"; stamp="`$2";
-dst="/var/backups/.pii-quarantine/`$stamp";
-mkdir -p "`$dst" 2>/dev/null || dst="`$HOME/.pii-quarantine/`$stamp";
-mkdir -p "`$dst" 2>/dev/null;
-if [ -e "`$f" ]; then
-  base="`$(basename "`$f")";
-  mv -f "`$f" "`$dst/`$base" 2>/dev/null && echo "QUARANTINED:`$dst/`$base" || echo "FAIL";
+    $script = @'
+set +e
+f="$1"
+stamp="$2"
+dst="/var/backups/.pii-quarantine/$stamp"
+mkdir -p "$dst" 2>/dev/null || dst="$HOME/.pii-quarantine/$stamp"
+mkdir -p "$dst" 2>/dev/null
+
+if [ -e "$f" ]; then
+  base=$(basename "$f")
+  if mv -f "$f" "$dst/$base" 2>/dev/null; then
+    echo "QUARANTINED:$dst/$base"
+  else
+    echo "FAIL"
+  fi
 else
-  echo "MISSING";
-fi' -- "$FilePath" "$RunStamp"
-"@
-        $sshArgs = @("-tt","-l",$LinuxUser,"-o","StrictHostKeyChecking=no","-o","UserKnownHostsFile=/dev/null",$TargetHost,$cmd)
-        & $sshBin @sshArgs 2>&1
-    }
+  echo "MISSING"
+fi
+exit 0
+'@
 
-    function Invoke-LinuxDelete {
-        param([string]$TargetHost,[string]$FilePath)
+    Invoke-SshScriptB64 -SshBin $sshBin -User $LinuxUser -TargetHost $TargetHost -ScriptText $script -Args @($FilePath,$RunStamp)
+}
 
-        $cmd = @"
-bash -lc 'f="`$1";
-if [ -e "`$f" ]; then rm -f "`$f" 2>/dev/null && echo "DELETED" || echo "FAIL"; else echo "MISSING"; fi' -- "$FilePath"
-"@
-        $sshArgs = @("-tt","-l",$LinuxUser,"-o","StrictHostKeyChecking=no","-o","UserKnownHostsFile=/dev/null",$TargetHost,$cmd)
-        & $sshBin @sshArgs 2>&1
-    }
+function Invoke-LinuxDelete {
+    param([string]$TargetHost,[string]$FilePath)
+
+    $script = @'
+set +e
+f="$1"
+if [ -e "$f" ]; then
+  rm -f "$f" 2>/dev/null && echo "DELETED" || echo "FAIL"
+else
+  echo "MISSING"
+fi
+exit 0
+'@
+
+    Invoke-SshScriptB64 -SshBin $sshBin -User $LinuxUser -TargetHost $TargetHost -ScriptText $script -Args @($FilePath)
+}
+
 
     # =========================================================
     # EXECUTE: WINDOWS (PARALLEL by default)
@@ -2175,31 +2247,31 @@ if (Read-YesNo "Run full backups now? (DNS files + DNS JSON + LocalSecPol + Fire
         Write-Host "[WARN] Firewall backup failed: $($_.Exception.Message)" -ForegroundColor Yellow
     }
 
-    # ----------------------------------------------------------
-    # REGISTRY BACKUP (HKLM/HKCU/HKCR/HKU/HKCC)
-    # ----------------------------------------------------------
-    try {
-        $regDir = Join-Path $runRoot "Registry"
-        New-Item -ItemType Directory -Path $regDir -Force | Out-Null
+    # # ----------------------------------------------------------
+    # # REGISTRY BACKUP (HKLM/HKCU/HKCR/HKU/HKCC)
+    # # ----------------------------------------------------------
+    # try {
+    #     $regDir = Join-Path $runRoot "Registry"
+    #     New-Item -ItemType Directory -Path $regDir -Force | Out-Null
 
-        $hklm = Join-Path $regDir "HKLM.reg"
-        $hkcu = Join-Path $regDir "HKCU.reg"
-        $hkcr = Join-Path $regDir "HKCR.reg"
-        $hku  = Join-Path $regDir "HKU.reg"
-        $hkcc = Join-Path $regDir "HKCC.reg"
+    #     $hklm = Join-Path $regDir "HKLM.reg"
+    #     $hkcu = Join-Path $regDir "HKCU.reg"
+    #     $hkcr = Join-Path $regDir "HKCR.reg"
+    #     $hku  = Join-Path $regDir "HKU.reg"
+    #     $hkcc = Join-Path $regDir "HKCC.reg"
 
-        & reg.exe export HKLM $hklm /y | Out-Null
-        & reg.exe export HKCU $hkcu /y | Out-Null
-        & reg.exe export HKCR $hkcr /y | Out-Null
-        & reg.exe export HKU  $hku  /y | Out-Null
-        & reg.exe export HKCC $hkcc /y | Out-Null
+    #     & reg.exe export HKLM $hklm /y | Out-Null
+    #     & reg.exe export HKCU $hkcu /y | Out-Null
+    #     & reg.exe export HKCR $hkcr /y | Out-Null
+    #     & reg.exe export HKU  $hku  /y | Out-Null
+    #     & reg.exe export HKCC $hkcc /y | Out-Null
 
-        Set-HiddenSystem $regDir
-        Set-HiddenSystem $hklm; Set-HiddenSystem $hkcu; Set-HiddenSystem $hkcr; Set-HiddenSystem $hku; Set-HiddenSystem $hkcc
-        Write-Host "[OK] Registry hives exported -> $regDir" -ForegroundColor Green
-    } catch {
-        Write-Host "[WARN] Registry backup failed: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
+    #     Set-HiddenSystem $regDir
+    #     Set-HiddenSystem $hklm; Set-HiddenSystem $hkcu; Set-HiddenSystem $hkcr; Set-HiddenSystem $hku; Set-HiddenSystem $hkcc
+    #     Write-Host "[OK] Registry hives exported -> $regDir" -ForegroundColor Green
+    # } catch {
+    #     Write-Host "[WARN] Registry backup failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    # }
 
     # ----------------------------------------------------------
     # WEB SERVER BACKUP (IIS default path)
@@ -2338,7 +2410,7 @@ else {
 
 
 Write-Section "Domain-wide SMB Hardening"
-if (Read-YesNo "Create/link a domain GPO to disable SMBv1, require SMB signing, and require SMB encryption (Script2-style)?" $true) {
+if (Read-YesNo "Create/link a domain GPO to disable SMBv1, require SMB signing, and require SMB encryption?" $true) {
 
     try {
         Ensure-Modules
@@ -2360,14 +2432,27 @@ if (Read-YesNo "Create/link a domain GPO to disable SMBv1, require SMB signing, 
         Set-Reg $n 'HKLM\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters' 'RequireSecuritySignature' DWord 1
         Set-Reg $n 'HKLM\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters' 'EnableSecuritySignature'  DWord 1
 
-        # --- Require SMB encryption (server rejects unencrypted SMB; Script2 does this) ---
+        # --- Require SMB encryption (server rejects unencrypted SMB) ---
         Set-Reg $n 'HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters' 'RejectUnencryptedAccess' DWord 1
 
         # --- Disable legacy Computer Browser service (SMBv1-era) ---
         Set-Reg $n 'HKLM\SYSTEM\CurrentControlSet\Services\Browser' 'Start' DWord 4
 
-        Write-Host "[OK] Domain GPO applied: SMBv1 disabled, SMB signing required, SMB encryption required ($($gpoSmb.DisplayName))." -ForegroundColor Green
+        # ===================== INSERT RIGHT HERE =====================
+        # LOCAL: remove SMB1 feature on THIS server (the one running goat.ps1)
+        if (Read-YesNo "Also uninstall SMB1 feature locally on THIS server? (recommended; may require reboot)" $true) {
+            Import-Module ServerManager -ErrorAction SilentlyContinue
+            $f = Get-WindowsFeature FS-SMB1 -ErrorAction SilentlyContinue
+            if ($f -and $f.Installed) {
+                Uninstall-WindowsFeature FS-SMB1 -Remove -ErrorAction Stop | Out-Null
+                Write-Host "[OK] Local FS-SMB1 feature removed (may require reboot)." -ForegroundColor Green
+            } else {
+                Write-Host "[NA] Local FS-SMB1 already not installed." -ForegroundColor DarkGray
+            }
+        }
+        # ===================== END INSERT =====================
 
+        Write-Host "[OK] Domain GPO applied: SMBv1 disabled, SMB signing required, SMB encryption required ($($gpoSmb.DisplayName))." -ForegroundColor Green
         Write-Host "[INFO] Reboot may be needed on some clients to fully unload SMB1 components." -ForegroundColor Gray
     }
     catch {
@@ -2847,17 +2932,18 @@ else { Write-Host "[SKIP] Password service autorestart" }
 
 
 Write-Section "Set Major Services to autorestart"
-if(Read-YesNo "Set Services like DNS and ADWS to auto-restart?" $false){
-    try{ 
-        sc failure DNS reset= 60 actions= restart/5000/restart/5000/restart/5000
-	sc failure W32Time reset= 60 actions= restart/5000/restart/5000/restart/5000
-	sc failure ADWS reset= 60 actions= restart/5000/restart/5000/restart/5000
-	sc failure DFSR reset= 60 actions= restart/5000/restart/5000/restart/5000 
-    } 
-    catch { 
-        Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red 
+if (Read-YesNo "Set Services like DNS and ADWS to auto-restart?" $false) {
+    try {
+        & sc.exe failure DNS    reset= 60 actions= restart/5000/restart/5000/restart/5000 | Out-Null
+        & sc.exe failure W32Time reset= 60 actions= restart/5000/restart/5000/restart/5000 | Out-Null
+        & sc.exe failure ADWS   reset= 60 actions= restart/5000/restart/5000/restart/5000 | Out-Null
+        & sc.exe failure DFSR   reset= 60 actions= restart/5000/restart/5000/restart/5000 | Out-Null
+        Write-Host "[OK] Service failure actions set." -ForegroundColor Green
     }
-} 
+    catch {
+        Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
 else { Write-Host "[SKIP] Password service autorestart" }
 
 
