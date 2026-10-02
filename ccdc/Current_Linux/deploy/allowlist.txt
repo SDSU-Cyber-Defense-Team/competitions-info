@@ -1,0 +1,3 @@
+# Authorized local login accounts.
+# Replace these sample entries with the PCR/authorized accounts for the target systems.
+failsafe
