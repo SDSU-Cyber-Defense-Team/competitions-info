@@ -1,6 +1,6 @@
 <#
 newgoat.ps1
-- made by Dashell Finn last updated mar 2026
+- made so far by Dashell Finn, last updated mar 2026
 - always a WIP script, there is always more I want to add.
 - added windows defender registry search thing, still lags out at end...
 - added pii search, not sure if im looking in the right directories
@@ -8,6 +8,15 @@ newgoat.ps1
 - added some random stuff from some schools at the top. Also added ntlmv1 fixes.
 - I debugged it a bunch, only things that seem to cause issues are the Defender search and the registry backup thing, they either hang or take to long but for defender it at least works.
 - if it ever stalls just send a newline and its usually fine (usually happens on port enum, should be almost instant)
+
+
+- TODO: merge with Alex's script so this single script truly hardens the entire domain >:)
+    - have the script send and run alex's script to each linux box automatically when supplied with the default root password at the start of the competition
+    - Merge into a single script file? worth it?
+
+- TODO: better user interface, ts looks cooked to new ppl
+- TODO: test against new environments
+- TODO: export findings to a file. File for each machine? zip file? whatever is easiest to upload to nextcloud.
 #>
 
 
