@@ -67,7 +67,7 @@ On each target, the hardening sequence:
    and run the script directly:
 
    ```sh
-   curl -fsSL https://raw.githubusercontent.com/SocomX1/CCDC-Resources/main/setup.sh | sh
+   curl -fsSL https://raw.githubusercontent.com/SDSU-Cyber-Defense-Team/competitions-info/main/ccdc/Current_Linux/setup.sh | sh
    ```
 
    The script installs missing `git`/Go build dependencies where supported,
